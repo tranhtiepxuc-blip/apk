@@ -1,85 +1,86 @@
-package com.duc.vcam;
+name: Build VCam APK via Raw Command Line
 
-import android.hardware.Camera;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.SurfaceTexture;
-import android.view.SurfaceHolder;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
+on:
+  push:
+    branches: [ "*" ]
+  workflow_dispatch:
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.XSharedPreferences;
-import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-public class XposedHook implements IXposedHookLoadPackage {
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
 
-    @Override
-    public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
-        if (lpparam.packageName.equals("android") || lpparam.packageName.equals("com.android.systemui") || lpparam.packageName.equals("com.duc.vcam")) {
-            return;
-        }
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
 
-        XposedBridge.log("[OmniVCam-Pro] Khởi động bẻ khóa camera cho app: " + lpparam.packageName);
+    # 🔨 BƯỚC 1: Dịch toàn bộ file Java thành .class
+    - name: Compile Java Source to Class
+      run: |
+        mkdir -p obj
+        ANDROID_JAR=$(find $ANDROID_HOME/platforms/ -name "android.jar" | sort -V | tail -n 1)
+        echo "🟢 Sử dụng Android SDK Platform: $ANDROID_JAR"
+        
+        find src -name "*.java" > sources.txt
+        javac -target 1.8 -source 1.8 \
+          -bootclasspath "$ANDROID_JAR" \
+          -d obj \
+          @sources.txt
 
-        // 🚀 BƯỚC MỚI 1: Bẻ luồng xem trước (Preview) thông qua SurfaceTexture
-        XposedHelpers.findAndHookMethod(Camera.class, "setPreviewTexture", SurfaceTexture.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                XposedBridge.log("[OmniVCam-Pro] Đang ép luồng hiển thị Preview (Texture)...");
-                // Chặn luồng ngắm để app không lấy dữ liệu camera thật hiển thị lên màn hình
-            }
-        });
+    # 🔨 BƯỚC 2: Ép toàn bộ class của app thành classes.dex (Đã chuẩn hóa lề YAML)
+    - name: Convert Class to Android Dex
+      run: |
+        mkdir -p dex_out
+        D8_PATH=$(find $ANDROID_HOME/build-tools/ -name "d8" | sort -V | tail -n 1)
+        echo "🟢 Sử dụng công cụ D8: $D8_PATH"
+        
+        find obj/com/duc/vcam -name "*.class" > app_classes.txt
+        $D8_PATH --release --output dex_out @app_classes.txt
 
-        // 🚀 BƯỚC MỚI 2: Bẻ luồng xem trước (Preview) thông qua SurfaceHolder
-        XposedHelpers.findAndHookMethod(Camera.class, "setPreviewDisplay", SurfaceHolder.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                XposedBridge.log("[OmniVCam-Pro] Đang ép luồng hiển thị Preview (Display)...");
-            }
-        });
+    # 🔨 BƯỚC 3: Đóng gói và ký chứng chỉ tự sinh
+    - name: Package Everything to Raw APK
+      run: |
+        mkdir -p Output
+        AAPT2_PATH=$(find $ANDROID_HOME/build-tools/ -name "aapt2" | sort -V | tail -n 1)
+        ANDROID_JAR=$(find $ANDROID_HOME/platforms/ -name "android.jar" | sort -V | tail -n 1)
+        
+        $AAPT2_PATH link -o Output/base.apk \
+          -I "$ANDROID_JAR" \
+          --manifest AndroidManifest.xml \
+          --target-sdk-version 34
 
-        // BƯỚC 3: Giữ nguyên luồng xử lý tráo ảnh khi bấm nút chụp
-        XposedHelpers.findAndHookMethod(Camera.class, "takePicture", 
-            Camera.ShutterCallback.class, 
-            Camera.PictureCallback.class, 
-            Camera.PictureCallback.class, 
-            Camera.PictureCallback.class, 
-            new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    XposedBridge.log("[OmniVCam-Pro] Thao tác bấm máy chụp kích hoạt!");
+        cd dex_out
+        zip -g ../Output/base.apk classes.dex
+        cd ..
 
-                    XSharedPreferences xPref = new XSharedPreferences("com.duc.vcam", "vcam_settings");
-                    xPref.makeWorldReadable();
-                    String customImagePath = xPref.getString("image_path", null);
+        mkdir -p assets
+        echo "com.duc.vcam.XposedHook" > assets/xposed_init
+        zip -g Output/base.apk assets/xposed_init
 
-                    if (customImagePath != null) {
-                        File imgFile = new File(customImagePath);
-                        if (imgFile.exists()) {
-                            XposedBridge.log("[OmniVCam-Pro] Đang nạp đè tấm ảnh tự chọn: " + customImagePath);
-                            
-                            Bitmap bitmap = BitmapFactory.decodeFile(customImagePath);
-                            if (bitmap != null) {
-                                ByteArrayOutputStream stream = new ByteArrayOutputStream();
-                                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream);
-                                byte[] fakePhotoBytes = stream.toByteArray();
+        # Tạo chứng chỉ ký xịn PKCS12 chống lỗi bảo mật của hệ điều hành
+        keytool -genkeypair -v \
+          -keystore my-release-key.p12 \
+          -alias my-alias \
+          -keyalg RSA \
+          -keysize 2048 \
+          -validity 10000 \
+          -storetype PKCS12 \
+          -storepass duc123456 \
+          -keypass duc123456 \
+          -dname "CN=duc, OU=omni, O=vcam, L=VN, S=VN, C=VN"
 
-                                if (param.args[3] != null) {
-                                    param.args[3] = new Camera.PictureCallback() {
-                                        @Override
-                                        public void onPictureTaken(byte[] data, Camera camera) {
-                                            ((Camera.PictureCallback) param.args[3]).onPictureTaken(fakePhotoBytes, camera);
-                                        }
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
-        });
-    }
-}
+        APKSIGNER_PATH=$(find $ANDROID_HOME/build-tools/ -name "apksigner" | sort -V | tail -n 1)
+        $APKSIGNER_PATH sign --ks my-release-key.p12 --ks-pass pass:duc123456 Output/base.apk
+        
+        mv Output/base.apk Output/Omni_VCam_Pro.apk
+
+    - name: Upload Finished APK to Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Omni-VCam-Pro-APK
+        path: Output/Omni_VCam_Pro.apk
