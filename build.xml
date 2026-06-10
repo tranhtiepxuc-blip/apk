@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="VCamModule" default="help">
+
+    <property file="local.properties" />
+    <property file="project.properties" />
+    
+    <condition property="sdk.dir" value="${env.ANDROID_HOME}">
+        <isset property="env.ANDROID_HOME" />
+    </condition>
+
+    <import file="${sdk.dir}/tools/ant/build.xml" />
+</project>
